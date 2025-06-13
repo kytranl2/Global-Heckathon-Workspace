@@ -8,7 +8,7 @@ resource "aws_vpc" "main" {
   enable_dns_hostnames = true
   enable_dns_support   = true
   tags = {
-    Name = "ecs-vpc"
+    Name = "ecs-vpc-2"
   }
 }
 
@@ -19,7 +19,7 @@ resource "aws_subnet" "public" {
   availability_zone = "us-east-1a"
   map_public_ip_on_launch = true
   tags = {
-    Name = "ecs-public-subnet"
+    Name = "ecs-public-subnet-2"
   }
 }
 
@@ -37,7 +37,7 @@ resource "aws_subnet" "public_2" {
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
   tags = {
-    Name = "ecs-igw"
+    Name = "ecs-igw2"
   }
 }
 
@@ -77,7 +77,7 @@ resource "aws_cloudwatch_log_group" "otel_collector_logs" {
 
 # ALB Security Group
 resource "aws_security_group" "alb_sg" {
-  name        = "alb-sg"
+  name        = "alb-sg2"
   description = "Allow HTTP traffic to ALB"
   vpc_id      = aws_vpc.main.id
 
@@ -140,8 +140,8 @@ resource "aws_security_group" "ecs_sg" {
 
 
 
-resource "aws_ecs_cluster" "my_first_ecs_cluster" {
-  name = "my_first_ecs_cluster"
+resource "aws_ecs_cluster" "spring_boot_ecs" {
+  name = "spring_boot_ecs"
 }
 
 
@@ -172,7 +172,7 @@ resource "aws_iam_role_policy_attachment" "ecs_instance_policy_attach" {
 
 #Define an IAM role for ECS instances
 resource "aws_iam_role" "ecs_instance_role" {
-  name = "ecs-instance-role"
+  name = "spring-boot-ecs-instance-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -228,7 +228,7 @@ resource "aws_launch_template" "ecs" {
 
   user_data = base64encode(<<EOF
 #!/bin/bash
-echo ECS_CLUSTER=${aws_ecs_cluster.my_first_ecs_cluster.name} >> /etc/ecs/ecs.config
+echo ECS_CLUSTER=${aws_ecs_cluster.spring_boot_ecs.name} >> /etc/ecs/ecs.config
 EOF
   )
 
@@ -259,106 +259,75 @@ resource "aws_autoscaling_group" "ecs" {
   }
 }
 
-# ECS Task Definition for Spring Boot App
 resource "aws_ecs_task_definition" "springboot" {
-  family             = "springboot-task"
-  network_mode       = "awsvpc"
+  family                   = "springboot-task"
+  network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                = "256"
-  memory             = "512"
-  execution_role_arn = aws_iam_role.ecs_task_execution_role.arn
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
 
-  container_definitions = jsonencode([
-    {
-      name      = "springboot-app",
-      image     = "198413840755.dkr.ecr.us-east-1.amazonaws.com/springboot-app:1.0.5",
-      essential = true,
-      portMappings = [
-        {
-          containerPort = 8080,
-          hostPort      = 8080
-        }
-      ],
-      environment = [
-        {
-          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
-          value = "http://localhost:4317"
-        },
-        {
-          name  = "OTEL_METRICS_EXPORTER"
-          value = "otlp"
-        },
-        {
-          name  = "OTEL_TRACES_EXPORTER"
-          value = "otlp"
-        },
-        {
-          name  = "OTEL_SERVICE_NAME"
-          value = "springboot-app"
-        }
-      ],
-      mountPoints = [
-        {
-          containerPath = "/otel"
-          sourceVolume  = "otel-volume"
-          readOnly      = false
-        }
-      ],
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-group         = "/ecs/springboot-task",
-          awslogs-region        = "us-east-1",
-          awslogs-stream-prefix = "ecs"
-        }
+  container_definitions = <<DEFINITION
+[
+  {
+    "name": "springboot-app",
+    "image": "198413840755.dkr.ecr.us-east-1.amazonaws.com/springboot-app:1.0.5",
+    "essential": true,
+    "portMappings": [
+      {
+        "containerPort": 8080,
+        "hostPort": 8080,
+        "protocol": "tcp"
       }
-    },
-    {
-      name      = "otel-collector",
-      image     = "198413840755.dkr.ecr.us-east-1.amazonaws.com/otel-collector:1.0.0",
-      essential = false,
-      portMappings = [
-        {
-          containerPort = 4317
-          hostPort      = 4317
-        },
-        {
-          containerPort = 4318
-          hostPort      = 4318
-        }
-      ],
-      command = [
-        "--config=/etc/otel-collector-config.yaml"
-      ],
-      mountPoints = [
-        {
-          containerPath = "/etc"
-          sourceVolume  = "otel-volume"
-          readOnly      = false
-        }
-      ],
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-group         = "/ecs/otel-collector",
-          awslogs-region        = "us-east-1",
-          awslogs-stream-prefix = "otel"
-        }
+    ],
+    "environment": [
+      { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
+      { "name": "OTEL_METRICS_EXPORTER",     "value": "otlp" },
+      { "name": "OTEL_TRACES_EXPORTER",      "value": "otlp" },
+      { "name": "OTEL_SERVICE_NAME",         "value": "springboot-app" }
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group":         "/ecs/springboot-task",
+        "awslogs-region":        "us-east-1",
+        "awslogs-stream-prefix": "ecs"
       }
     }
-  ])
-
-  volume {
-    name = "otel-volume"
-    # Fargate doesn't support host_path; we just declare the name
+  },
+  {
+    "name": "otel-collector",
+    "image": "198413840755.dkr.ecr.us-east-1.amazonaws.com/otel-collector:1.0.0",
+    "essential": false,
+    "portMappings": [
+      {
+        "containerPort": 4317,
+        "hostPort": 4317,
+        "protocol": "tcp"
+      },
+      {
+        "containerPort": 4318,
+        "hostPort": 4318,
+        "protocol": "tcp"
+      }
+    ],
+    "command": ["--config=/etc/otel-collector-config.yaml"],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group":         "/ecs/otel-collector",
+        "awslogs-region":        "us-east-1",
+        "awslogs-stream-prefix": "otel"
+      }
+    }
   }
+]
+DEFINITION
 
   depends_on = [
     aws_cloudwatch_log_group.springboot_logs,
     aws_cloudwatch_log_group.otel_collector_logs
   ]
-
-
 }
 
 
@@ -419,7 +388,7 @@ resource "aws_lb_listener" "http" {
 #ECS Service
 resource "aws_ecs_service" "springboot_service" {
   name            = "springboot-service"
-  cluster         = aws_ecs_cluster.my_first_ecs_cluster.id
+  cluster         = aws_ecs_cluster.spring_boot_ecs.id
   task_definition = aws_ecs_task_definition.springboot.arn
   desired_count   = 1
   launch_type     = "FARGATE"  # or FARGATE if using awsvpc mode
