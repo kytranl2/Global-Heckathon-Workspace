@@ -12,9 +12,7 @@ resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = {
-    Name = "ecs-vpc-2"
-  }
+  tags = { Name = "ecs-vpc-2" }
 }
 
 resource "aws_subnet" "public" {
@@ -22,9 +20,7 @@ resource "aws_subnet" "public" {
   cidr_block              = "10.0.1.0/24"
   availability_zone       = "us-east-1a"
   map_public_ip_on_launch = true
-  tags = {
-    Name = "ecs-public-subnet-2-a"
-  }
+  tags = { Name = "ecs-public-subnet-2-a" }
 }
 
 resource "aws_subnet" "public_2" {
@@ -32,16 +28,12 @@ resource "aws_subnet" "public_2" {
   cidr_block              = "10.0.2.0/24"
   availability_zone       = "us-east-1b"
   map_public_ip_on_launch = true
-  tags = {
-    Name = "ecs-public-subnet-2-b"
-  }
+  tags = { Name = "ecs-public-subnet-2-b" }
 }
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
-  tags = {
-    Name = "ecs-igw2"
-  }
+  tags   = { Name = "ecs-igw2" }
 }
 
 resource "aws_route_table" "public" {
@@ -52,9 +44,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.igw.id
   }
 
-  tags = {
-    Name = "ecs-public-route-table"
-  }
+  tags = { Name = "ecs-public-route-table" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -86,7 +76,7 @@ resource "aws_cloudwatch_log_group" "otel_importer_logs" {
 }
 
 ###############################################################################
-# KINESIS STREAM (for the exporter)
+# KINESIS STREAM
 ###############################################################################
 resource "aws_kinesis_stream" "telemetry_stream" {
   name             = "telemetry-stream"
@@ -97,9 +87,10 @@ resource "aws_kinesis_stream" "telemetry_stream" {
 ###############################################################################
 # SECURITY GROUPS
 ###############################################################################
+# ALB for Spring Boot (80 → ecs_sg:8080)
 resource "aws_security_group" "alb_sg" {
   name        = "alb-sg"
-  description = "Allow HTTP to ALB"
+  description = "Allow HTTP(80) from Internet"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -116,14 +107,13 @@ resource "aws_security_group" "alb_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "alb-sg"
-  }
+  tags = { Name = "alb-sg" }
 }
 
+# ECS tasks for Spring Boot allow only ALB→8080
 resource "aws_security_group" "ecs_sg" {
   name        = "ecs-sg"
-  description = "Allow ALB to talk to tasks"
+  description = "Allow 8080 from Spring Boot ALB"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -133,13 +123,6 @@ resource "aws_security_group" "ecs_sg" {
     security_groups = [aws_security_group.alb_sg.id]
   }
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -147,14 +130,13 @@ resource "aws_security_group" "ecs_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "ecs-sg"
-  }
+  tags = { Name = "ecs-sg" }
 }
 
-resource "aws_security_group" "exporter_sg" {
-  name        = "exporter-sg"
-  description = "Allow OTLP from ECS tasks"
+# ALB for OTLP Exporter (4317 → exporter_sg:4317)
+resource "aws_security_group" "exporter_alb_sg" {
+  name        = "exporter-alb-sg"
+  description = "Allow OTLP(4317) from app tasks"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -171,9 +153,30 @@ resource "aws_security_group" "exporter_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "exporter-sg"
+  tags = { Name = "exporter-alb-sg" }
+}
+
+# ECS tasks for Exporter allow only exporter ALB→4317
+resource "aws_security_group" "exporter_sg" {
+  name        = "exporter-sg"
+  description = "Allow 4317 from exporter ALB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port       = 4317
+    to_port         = 4317
+    protocol        = "tcp"
+    security_groups = [aws_security_group.exporter_alb_sg.id]
   }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "exporter-sg" }
 }
 
 ###############################################################################
@@ -184,16 +187,15 @@ resource "aws_ecs_cluster" "spring_boot_ecs" {
 }
 
 ###############################################################################
-# IAM ROLES & ATTACHMENTS
+# IAM ROLES & POLICIES
 ###############################################################################
-# ECS Task Execution Role (for pulling images, logging, etc.)
 resource "aws_iam_role" "ecs_task_execution_role" {
-  name = "ecsTaskExecutionRole"
+  name               = "ecsTaskExecutionRole"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17",
     Statement = [{
-      Action    = "sts:AssumeRole"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole",
+      Principal = { Service = "ecs-tasks.amazonaws.com" },
       Effect    = "Allow"
     }]
   })
@@ -204,43 +206,14 @@ resource "aws_iam_role_policy_attachment" "ecs_task_exec_attach" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ECS EC2 Instance Role (for EC2-backed ECS clusters)
-resource "aws_iam_role" "ecs_instance_role" {
-  name = "spring-boot-ecs-instance-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17",
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Principal = { Service = "ec2.amazonaws.com" }
-      Effect    = "Allow"
-    }]
-  })
-}
-
-resource "aws_iam_instance_profile" "ecs_instance_profile" {
-  name = "ecs-instance-profile"
-  role = aws_iam_role.ecs_instance_role.name
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_ecr_readonly" {
-  role       = aws_iam_role.ecs_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_ec2_service" {
-  role       = aws_iam_role.ecs_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
-}
-
-# OTLP importer task role (to write into Kinesis)
 resource "aws_iam_role" "exporter_task_role" {
-  name = "otel-exporter-task-role"
+  name               = "otel-exporter-task-role"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17",
     Statement = [{
+      Action    = "sts:AssumeRole",
+      Principal = { Service = "ecs-tasks.amazonaws.com" },
       Effect    = "Allow"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
-      Action    = "sts:AssumeRole"
     }]
   })
 }
@@ -251,69 +224,53 @@ resource "aws_iam_role_policy" "exporter_kinesis" {
   policy = jsonencode({
     Version   = "2012-10-17",
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["kinesis:PutRecord","kinesis:PutRecords"]
+      Effect   = "Allow",
+      Action   = ["kinesis:PutRecord","kinesis:PutRecords"],
       Resource = aws_kinesis_stream.telemetry_stream.arn
     }]
   })
 }
 
 ###############################################################################
-# DATA SOURCE: ECS-OPTIMIZED AMI
+# INTERNAL ALB FOR OTLP EXPORTER
 ###############################################################################
-data "aws_ami" "ecs_ami" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-ecs-hvm-*-x86_64-ebs"]
-  }
+resource "aws_lb" "exporter_alb" {
+  name               = "otel-exporter-alb"
+  internal           = true
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.exporter_alb_sg.id]
+  subnets            = [aws_subnet.public.id, aws_subnet.public_2.id]
+  tags               = { Name = "otel-exporter-alb" }
 }
 
-###############################################################################
-# EC2 + AUTO SCALING GROUP for EC2-backed ECS (optional)
-###############################################################################
-resource "aws_launch_template" "ecs" {
-  name_prefix            = "ecs-launch-"
-  image_id               = data.aws_ami.ecs_ami.id
-  instance_type          = "t3.small"
+resource "aws_lb_target_group" "exporter_tg" {
+  name        = "otel-exporter-tg"
+  port        = 4317
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"
 
-  iam_instance_profile {
-    name = aws_iam_instance_profile.ecs_instance_profile.name
+  health_check {
+    protocol            = "HTTP"
+    path                = "/"
+    matcher             = "200-499"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
   }
 
-  user_data = base64encode(<<EOF
-#!/bin/bash
-echo ECS_CLUSTER=${aws_ecs_cluster.spring_boot_ecs.name} >> /etc/ecs/ecs.config
-EOF
-  )
-
-  vpc_security_group_ids = [aws_security_group.ecs_sg.id]
-
-  tags = {
-    Name = "ecs-launch-template"
-  }
+  tags = { Name = "otel-exporter-tg" }
 }
 
-resource "aws_autoscaling_group" "ecs" {
-  desired_capacity    = 1
-  max_size            = 1
-  min_size            = 1
-  vpc_zone_identifier = [
-    aws_subnet.public.id,
-    aws_subnet.public_2.id,
-  ]
+resource "aws_lb_listener" "exporter_listener" {
+  load_balancer_arn = aws_lb.exporter_alb.arn
+  port              = 4317
+  protocol          = "HTTP"
 
-  launch_template {
-    id      = aws_launch_template.ecs.id
-    version = "$Latest"
-  }
-
-  tag {
-    key                 = "Name"
-    value               = "ecs-instance"
-    propagate_at_launch = true
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.exporter_tg.arn
   }
 
   lifecycle {
@@ -322,7 +279,7 @@ resource "aws_autoscaling_group" "ecs" {
 }
 
 ###############################################################################
-# ECS TASK DEFINITIONS
+# SPRINGBOOT ECS TASK DEFINITION
 ###############################################################################
 resource "aws_ecs_task_definition" "springboot" {
   family                   = "springboot-task"
@@ -331,6 +288,12 @@ resource "aws_ecs_task_definition" "springboot" {
   cpu                      = "256"
   memory                   = "512"
   execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  task_role_arn            = aws_iam_role.exporter_task_role.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
 
   container_definitions = <<EOF
 [
@@ -342,10 +305,11 @@ resource "aws_ecs_task_definition" "springboot" {
       { "containerPort": 8080, "hostPort": 8080, "protocol": "tcp" }
     ],
     "environment": [
-      { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel-exporter.internal:4317" },
-      { "name": "OTEL_METRICS_EXPORTER",     "value": "otlp" },
-      { "name": "OTEL_TRACES_EXPORTER",      "value": "otlp" },
-      { "name": "OTEL_SERVICE_NAME",         "value": "springboot-app" }
+      { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://${aws_lb.exporter_alb.dns_name}:4317" },
+      { "name": "OTEL_EXPORTER_OTLP_PROTOCOL", "value": "grpc" },
+      { "name": "OTEL_METRICS_EXPORTER",         "value": "otlp" },
+      { "name": "OTEL_TRACES_EXPORTER",          "value": "otlp" },
+      { "name": "OTEL_SERVICE_NAME",             "value": "springboot-app" }
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
@@ -365,9 +329,6 @@ resource "aws_ecs_task_definition" "springboot" {
       { "containerPort": 4318, "hostPort": 4318, "protocol": "tcp" }
     ],
     "command": ["--config=/etc/otel-collector-config.yaml"],
-    "mountPoints": [
-      { "containerPath": "/etc", "sourceVolume": "otel-volume", "readOnly": false }
-    ],
     "logConfiguration": {
       "logDriver": "awslogs",
       "options": {
@@ -380,16 +341,16 @@ resource "aws_ecs_task_definition" "springboot" {
 ]
 EOF
 
-  volume {
-    name = "otel-volume"
-  }
-
   depends_on = [
     aws_cloudwatch_log_group.springboot_logs,
     aws_cloudwatch_log_group.otel_collector_logs,
+    aws_cloudwatch_log_group.otel_importer_logs,
   ]
 }
 
+###############################################################################
+# OTEL EXPORTER ECS TASK DEFINITION
+###############################################################################
 resource "aws_ecs_task_definition" "otel_exporter" {
   family                   = "otel-exporter"
   network_mode             = "awsvpc"
@@ -399,6 +360,11 @@ resource "aws_ecs_task_definition" "otel_exporter" {
   execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
   task_role_arn            = aws_iam_role.exporter_task_role.arn
 
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+
   container_definitions = <<EOF
 [
   {
@@ -406,7 +372,11 @@ resource "aws_ecs_task_definition" "otel_exporter" {
     "image": "198413840755.dkr.ecr.us-east-1.amazonaws.com/otel-exporter:1.0.0",
     "essential": true,
     "portMappings": [
-      { "containerPort": 4317, "protocol": "tcp" }
+      { "containerPort": 4317, "hostPort": 4317, "protocol": "tcp" }
+    ],
+    "environment": [
+      { "name": "AWS_REGION", "value": "us-east-1" },
+      { "name": "STREAM_NAME", "value": "${aws_kinesis_stream.telemetry_stream.name}" }
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
@@ -426,21 +396,15 @@ EOF
 }
 
 ###############################################################################
-# ALB, TARGET GROUP, LISTENER
+# ALB & ECS SERVICE FOR SPRINGBOOT
 ###############################################################################
 resource "aws_lb" "alb" {
   name               = "springboot-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb_sg.id]
-  subnets            = [
-    aws_subnet.public.id,
-    aws_subnet.public_2.id,
-  ]
-
-  tags = {
-    Name = "springboot-alb"
-  }
+  subnets            = [aws_subnet.public.id, aws_subnet.public_2.id]
+  tags               = { Name = "springboot-alb" }
 }
 
 resource "aws_lb_target_group" "springboot_tg" {
@@ -460,9 +424,7 @@ resource "aws_lb_target_group" "springboot_tg" {
     unhealthy_threshold = 2
   }
 
-  tags = {
-    Name = "springboot-tg"
-  }
+  tags = { Name = "springboot-tg" }
 }
 
 resource "aws_lb_listener" "http" {
@@ -480,36 +442,6 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-###############################################################################
-# SERVICE DISCOVERY (for importer)
-###############################################################################
-resource "aws_service_discovery_private_dns_namespace" "internal" {
-  name        = "internal"
-  description = "private namespace for ECS services"
-  vpc         = aws_vpc.main.id
-}
-
-resource "aws_service_discovery_service" "otel_exporter_sd" {
-  name = "otel-exporter"
-
-  dns_config {
-    namespace_id   = aws_service_discovery_private_dns_namespace.internal.id
-    routing_policy = "MULTIVALUE"
-
-    dns_records {
-      type = "A"
-      ttl  = 10
-    }
-  }
-
-  health_check_custom_config {
-    failure_threshold = 1
-  }
-}
-
-###############################################################################
-# ECS SERVICES
-###############################################################################
 resource "aws_ecs_service" "springboot_service" {
   name            = "springboot-service"
   cluster         = aws_ecs_cluster.spring_boot_ecs.id
@@ -518,10 +450,7 @@ resource "aws_ecs_service" "springboot_service" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [
-      aws_subnet.public.id,
-      aws_subnet.public_2.id,
-    ]
+    subnets          = [aws_subnet.public.id, aws_subnet.public_2.id]
     security_groups  = [aws_security_group.ecs_sg.id]
     assign_public_ip = true
   }
@@ -535,27 +464,27 @@ resource "aws_ecs_service" "springboot_service" {
   depends_on = [aws_lb_listener.http]
 }
 
+###############################################################################
+# ECS SERVICE FOR OTEL EXPORTER
+###############################################################################
 resource "aws_ecs_service" "otel_exporter_svc" {
-  name            = "otel-exporter-svc"
+  name            = "otel-exporter-service"
   cluster         = aws_ecs_cluster.spring_boot_ecs.id
   task_definition = aws_ecs_task_definition.otel_exporter.arn
   desired_count   = 1
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [
-      aws_subnet.public.id,
-      aws_subnet.public_2.id,
-    ]
+    subnets          = [aws_subnet.public.id, aws_subnet.public_2.id]
     security_groups  = [aws_security_group.exporter_sg.id]
     assign_public_ip = true
   }
 
-  # no container_port here!
-  service_registries {
-    registry_arn   = aws_service_discovery_service.otel_exporter_sd.arn
-    container_name = "otel-exporter"
+  load_balancer {
+    target_group_arn = aws_lb_target_group.exporter_tg.arn
+    container_name   = "otel-exporter"
+    container_port   = 4317
   }
 
-  depends_on = [aws_lb_listener.http]
+  depends_on = [aws_lb_listener.exporter_listener]
 }
